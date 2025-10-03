@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Multi File Upload (JSON Payload)</title>
+	<!-- Bootstrap 5 CDN -->
+	<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+	<style>
+		body { background:#f8f9fa; }
+		.drop-zone { border:2px dashed #6c757d; border-radius: .75rem; padding:2rem; text-align:center; color:#6c757d; background:#fff; transition: background .15s, border-color .15s; }
+		.drop-zone.dragover { background:#e9f5ff; border-color:#0d6efd; color:#0d6efd; }
+		.thumb { width:64px; height:64px; object-fit:cover; border-radius:.5rem; border:1px solid #dee2e6; }
+		.file-row { animation: fadeIn .25s ease-in; }
+		@keyframes fadeIn { from { opacity:0; transform: translateY(4px);} to {opacity:1; transform:none;} }
+		pre.json-preview { max-height:240px; overflow:auto; background:#212529; color:#e9ecef; padding:1rem; font-size:.75rem; }
+	</style>
+</head>
+<body>
+	<div class="container py-5">
+		<h1 class="h3 mb-4">Upload Multiple Files (Bootstrap + JSON)</h1>
+		<div class="mb-3 small text-muted">Selected files will be read in the browser and sent as a JSON payload (Base64). Suitable for quick prototypes or small files (&lt; ~5MB each). For large files prefer streaming / multipart/form-data.</div>
+
+		<div id="dropZone" class="drop-zone mb-3">
+			<p class="mb-1 fw-semibold">Drag & Drop files here</p>
+			<p class="mb-0 small">or</p>
+			<button id="browseBtn" type="button" class="btn btn-sm btn-outline-primary mt-2">Browse Files</button>
+			<input id="fileInput" type="file" class="d-none" multiple />
+		</div>
+
+		<form id="uploadForm" class="card shadow-sm">
+			<div class="card-body">
+				<div class="d-flex justify-content-between align-items-center mb-3">
+					<h2 class="h6 mb-0">Selected Files</h2>
+					<div>
+						<button type="button" id="clearAllBtn" class="btn btn-sm btn-outline-secondary me-2" disabled>Clear All</button>
+						<button type="submit" id="uploadBtn" class="btn btn-sm btn-primary" disabled>Upload</button>
+					</div>
+				</div>
+				<div class="table-responsive">
+					<table class="table table-sm align-middle mb-0">
+						<thead class="table-light">
+							<tr>
+								<th style="width:72px;">Preview</th>
+								<th>Name</th>
+								<th class="text-nowrap">Type</th>
+								<th class="text-end text-nowrap" style="width:120px;">Size (KB)</th>
+								<th style="width:48px;"></th>
+							</tr>
+						</thead>
+						<tbody id="fileList">
+							<tr id="placeholderRow"><td colspan="5" class="text-muted text-center small">No files selected.</td></tr>
+						</tbody>
+					</table>
+				</div>
+				<div class="mt-3">
+					<label class="form-label mb-1 small text-muted">JSON Preview (first 10KB)</label>
+					<pre id="jsonPreview" class="json-preview rounded"></pre>
+				</div>
+				<div id="statusArea" class="mt-3 small"></div>
+			</div>
+		</form>
+
+		<!-- Image Preview Modal -->
+		<div class="modal fade" id="imagePreviewModal" tabindex="-1" aria-hidden="true">
+			<div class="modal-dialog modal-dialog-centered modal-lg">
+				<div class="modal-content">
+					<div class="modal-header py-2">
+						<h5 class="modal-title small" id="imagePreviewTitle">Image Preview</h5>
+						<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+					</div>
+					<div class="modal-body p-2 text-center bg-dark">
+						<img id="imagePreviewImg" src="" alt="Preview" class="img-fluid rounded" style="max-height:70vh; object-fit:contain;" />
+					</div>
+					<div class="modal-footer py-2 justify-content-between">
+						<small id="imageMeta" class="text-muted"></small>
+						<button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+	<script>
+		// Configuration (adjust endpoint as needed)
+		const UPLOAD_ENDPOINT = 'http://127.0.0.1:5000/upload'; // Change to your server endpoint
+		const MAX_FILES = 25;             // Hard limit to prevent accidental huge payloads
+		const MAX_TOTAL_MB = 50;          // Total size cap (MB) for JSON method
+
+		const fileInput = document.getElementById('fileInput');
+		const browseBtn = document.getElementById('browseBtn');
+		const dropZone = document.getElementById('dropZone');
+		const fileListTbody = document.getElementById('fileList');
+		const placeholderRow = document.getElementById('placeholderRow');
+		const uploadBtn = document.getElementById('uploadBtn');
+		const clearAllBtn = document.getElementById('clearAllBtn');
+		const uploadForm = document.getElementById('uploadForm');
+		const jsonPreviewEl = document.getElementById('jsonPreview');
+		const statusArea = document.getElementById('statusArea');
+
+		let files = []; // Array of File objects
+
+		browseBtn.addEventListener('click', () => fileInput.click());
+		fileInput.addEventListener('change', (e) => {
+			addFiles(e.target.files);
+			fileInput.value = '';
+		});
+
+		// Drag & Drop events
+		['dragenter','dragover'].forEach(evt => dropZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.add('dragover'); }));
+		['dragleave','drop'].forEach(evt => dropZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); if(evt==='drop') handleDrop(e); dropZone.classList.remove('dragover'); }));
+
+		function handleDrop(e){
+			const dt = e.dataTransfer;
+			if(dt && dt.files) addFiles(dt.files);
+		}
+
+		function addFiles(fileList){
+			const incoming = Array.from(fileList);
+			let changed = false;
+			for(const f of incoming){
+				if(files.length >= MAX_FILES) { toastStatus(`File limit (${MAX_FILES}) reached; skipping ${f.name}`, 'warning'); break; }
+				if(!files.find(existing => existing.name === f.name && existing.size === f.size)) { files.push(f); changed = true; }
+			}
+			if(changed) refreshFileTable();
+		}
+
+		function removeFile(idx){
+			files.splice(idx,1);
+			refreshFileTable();
+		}
+
+		function clearAll(){
+			files = [];
+			refreshFileTable();
+		}
+		clearAllBtn.addEventListener('click', clearAll);
+
+		const URL_API = (typeof window !== 'undefined' && (window.URL || window.webkitURL)) || {};
+		function safeRevoke(url){
+			try { if(url && URL_API && typeof URL_API.revokeObjectURL === 'function') URL_API.revokeObjectURL(url); } catch(_){}
+		}
+
+		function refreshFileTable(){
+			fileListTbody.innerHTML='';
+			if(files.length === 0){
+				fileListTbody.appendChild(placeholderRow);
+				placeholderRow.classList.remove('d-none');
+			} else {
+				placeholderRow.classList.add('d-none');
+				files.forEach((file, idx) => {
+					const tr = document.createElement('tr');
+					tr.className = 'file-row';
+					const isImage = file.type.startsWith('image/');
+					const objectURL = isImage && URL_API.createObjectURL ? URL_API.createObjectURL(file) : '';
+					tr.innerHTML = `
+						<td>${isImage ? `<img data-blob="${objectURL}" src="${objectURL}" class="thumb" alt="thumb">` : '<span class="badge bg-secondary">FILE</span>'}</td>
+						<td class="text-break">${escapeHtml(file.name)}</td>
+						<td class="small text-nowrap">${file.type || '—'}</td>
+						<td class="text-end small">${(file.size/1024).toFixed(1)}</td>
+						<td class="text-end d-flex gap-1 justify-content-end">
+							${isImage ? `<button type="button" class="btn btn-sm btn-outline-primary" data-preview="${idx}" title="Preview">👁</button>` : ''}
+							<button type="button" class="btn btn-sm btn-outline-danger" data-remove="${idx}" aria-label="Remove">&times;</button>
+						</td>`;
+					fileListTbody.appendChild(tr);
+					// Attach onload listener programmatically for safety
+					if(isImage){
+						const img = tr.querySelector('img.thumb');
+						if(img) img.addEventListener('load', () => { safeRevoke(img.getAttribute('data-blob')); img.removeAttribute('data-blob'); });
+					}
+				});
+			}
+			uploadBtn.disabled = files.length === 0;
+			clearAllBtn.disabled = files.length === 0;
+			debounceBuildPreview();
+		}
+
+		// JSON Assembly
+		async function buildJsonPayload(){
+			const totalBytes = files.reduce((a,b)=>a+b.size,0);
+			const totalMB = totalBytes / (1024*1024);
+			if(totalMB > MAX_TOTAL_MB){
+				throw new Error(`Total size ${(totalMB).toFixed(2)}MB exceeds limit of ${MAX_TOTAL_MB}MB for JSON upload.`);
+			}
+			const encoded = [];
+			for(const f of files){
+				const base64 = await fileToBase64(f);
+				encoded.push({
+					name: f.name,
+						type: f.type,
+						size: f.size,
+						lastModified: f.lastModified,
+						contentBase64: base64.split(',')[1] // remove data: prefix
+				});
+			}
+			return { files: encoded, meta: { count: encoded.length, generatedAt: new Date().toISOString() } };
+		}
+
+		function fileToBase64(file){
+			return new Promise((resolve, reject) => {
+				const reader = new FileReader();
+				reader.onload = () => resolve(reader.result);
+				reader.onerror = reject;
+				reader.readAsDataURL(file);
+			});
+		}
+
+		// JSON Preview (truncated)
+		let previewTimer;
+		function debounceBuildPreview(){
+			clearTimeout(previewTimer);
+			previewTimer = setTimeout(async () => {
+				if(files.length === 0){ jsonPreviewEl.textContent=''; return; }
+				try {
+					// Only sample first few files for preview to stay light
+					const sample = files.slice(0,3);
+					const encoded = [];
+					for(const f of sample){
+						const b64 = await fileToBase64(f);
+						encoded.push({ name:f.name, type:f.type, size:f.size, contentBase64: b64.split(',')[1].slice(0,120) + (b64.length>120?'…':'') });
+					}
+					const previewObj = { files: encoded, meta:{ sample: true } };
+					const str = JSON.stringify(previewObj, null, 2);
+					jsonPreviewEl.textContent = str.length > 10000 ? str.slice(0,10000)+'\n…(truncated)' : str;
+				} catch(err){ jsonPreviewEl.textContent = 'Preview error: ' + err.message; }
+			}, 300);
+		}
+
+		// Submit handler
+		uploadForm.addEventListener('submit', async (e) => {
+			e.preventDefault();
+			if(files.length === 0) return;
+			setStatus('Building JSON payload…', 'info');
+			setBusy(true);
+			try {
+				const payload = await buildJsonPayload();
+				// Update preview with actual payload meta only (avoid large paste)
+				jsonPreviewEl.textContent = JSON.stringify({meta: payload.meta}, null, 2);
+				setStatus('Uploading…', 'info');
+				const controller = new AbortController();
+				const timeout = setTimeout(()=>controller.abort(), 120000); // 2 min timeout
+				const res = await fetch(UPLOAD_ENDPOINT, {
+					method:'POST',
+					headers:{ 'Content-Type':'application/json' },
+					body: JSON.stringify(payload),
+					signal: controller.signal
+				});
+				clearTimeout(timeout);
+				if(!res.ok) throw new Error('Server responded ' + res.status);
+				const data = await res.json().catch(()=>({ raw: 'No JSON body' }));
+				setStatus('Upload complete.', 'success');
+				console.log('Server response:', data);
+			} catch(err){
+				if(err.name === 'AbortError') setStatus('Upload aborted (timeout).', 'danger');
+				else setStatus('Error: ' + err.message, 'danger');
+			} finally {
+				setBusy(false);
+			}
+		});
+
+		// Event delegation for remove & preview buttons
+		fileListTbody.addEventListener('click', (e) => {
+			const removeBtn = e.target.closest('button[data-remove]');
+			if(removeBtn){
+				const idx = parseInt(removeBtn.getAttribute('data-remove'),10);
+				removeFile(idx);
+				return;
+			}
+			const previewBtn = e.target.closest('button[data-preview]');
+			if(previewBtn){
+				const idx = parseInt(previewBtn.getAttribute('data-preview'),10);
+				openImagePreview(idx);
+			}
+		});
+
+		// Image preview logic
+		const previewModalEl = document.getElementById('imagePreviewModal');
+		const previewImgEl = document.getElementById('imagePreviewImg');
+		const previewTitleEl = document.getElementById('imagePreviewTitle');
+		const imageMetaEl = document.getElementById('imageMeta');
+		let previewObjectUrl = null;
+		const previewModal = new bootstrap.Modal(previewModalEl);
+
+		function openImagePreview(idx){
+			const f = files[idx];
+			if(!f || !f.type.startsWith('image/')) return;
+			if(previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+			previewObjectUrl = URL.createObjectURL(f);
+			previewImgEl.src = previewObjectUrl;
+			previewTitleEl.textContent = f.name;
+			imageMetaEl.textContent = `${f.type || 'unknown'} • ${(f.size/1024).toFixed(1)} KB`;
+			previewModal.show();
+		}
+
+		previewModalEl.addEventListener('hidden.bs.modal', () => {
+			if(previewObjectUrl){ URL.revokeObjectURL(previewObjectUrl); previewObjectUrl=null; }
+			previewImgEl.src='';
+		});
+
+		function escapeHtml(str){
+			return str.replace(/[&<>"]+/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s] || s));
+		}
+
+		function setStatus(msg, type){
+			statusArea.innerHTML = `<span class="badge text-bg-${type}">${msg}</span>`;
+		}
+		function toastStatus(msg,type){ setStatus(msg,type); }
+		function setBusy(isBusy){
+			uploadBtn.disabled = isBusy || files.length===0;
+			clearAllBtn.disabled = isBusy || files.length===0;
+			browseBtn.disabled = isBusy;
+			if(isBusy) uploadBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Uploading';
+			else uploadBtn.textContent = 'Upload';
+		}
+
+	</script>
+</body>
+</html>
