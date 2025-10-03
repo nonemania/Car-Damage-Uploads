@@ -5,7 +5,7 @@ import base64, os
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-UPLOAD_FOLDER = "uploads"
+UPLOAD_FOLDER = "Car-Damage-Uploads/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 @app.route("/upload", methods=["POST"])
